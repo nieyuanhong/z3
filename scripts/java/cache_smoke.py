@@ -12,7 +12,7 @@ CACHE_MODES = {'cache-default', 'cache-reuse', 'cache-concurrent', 'cache-corrup
                'cache-retention', 'cache-links', 'cache-failure', 'cache-classloaders-concurrent'}
 
 
-def cache_smoke(jar, classes, work, version, libraries, environment, run):
+def cache_smoke(jar, classes, work, version, libraries, environment, run, jvm_options=()):
     work.mkdir()
     home = work / 'home'
     home.mkdir()
@@ -23,7 +23,7 @@ def cache_smoke(jar, classes, work, version, libraries, environment, run):
 
     def command(temporary, root=cache, extra=(), helper=None):
         temporary.mkdir()
-        args = ['java', '-Djava.library.path=' + str(empty.resolve()),
+        args = ['java', *jvm_options, '-Djava.library.path=' + str(empty.resolve()),
                 '-Djava.io.tmpdir=' + str(temporary.resolve()), '-Duser.home=' + str(home.resolve())]
         if root is not None:
             args.append('-Dz3.nativeCacheDir=' + str(root.absolute()))

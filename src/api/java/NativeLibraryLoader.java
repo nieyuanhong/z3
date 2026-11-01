@@ -74,6 +74,8 @@ final class NativeLibraryLoader {
                 stage = "extracting bundled resources for " + platform + " to " + directory;
                 Path corePath = extract(directory, core, coreInput);
                 Path bridgePath = extract(directory, bridge, bridgeInput);
+                verifyCompact(platform, core, corePath);
+                verifyCompact(platform, bridge, bridgePath);
                 stage = "loading " + corePath;
                 System.load(corePath.toAbsolutePath().toString());
                 stage = "loading " + bridgePath;
@@ -100,10 +102,66 @@ final class NativeLibraryLoader {
     private static InputStream resource(String platform, String name) throws IOException {
         String path = "/com/microsoft/z3/native/" + platform + "/" + name;
         InputStream input = NativeLibraryLoader.class.getResourceAsStream(path);
-        if (input == null) {
-            throw new FileNotFoundException("Missing bundled native resource " + path);
+        if (input != null) {
+            return input;
         }
-        return input;
+        input = NativeLibraryLoader.class.getResourceAsStream(path + ".xz");
+        if (input == null) {
+            throw new FileNotFoundException("Missing bundled native resource " + path + " (or .xz)");
+        }
+        try {
+            // Fork experiment only. Reflection keeps ordinary source/API builds dependency-free.
+            // The compact JAR contains a privately relocated Java 8 decoder, not an application dependency.
+            Class<?> decoder = Class.forName("com.microsoft.z3.internal.xz.XZInputStream",
+                true, NativeLibraryLoader.class.getClassLoader());
+            return (InputStream) decoder.getConstructor(InputStream.class, int.class)
+                .newInstance(input, 64 * 1024);
+        } catch (ReflectiveOperationException | LinkageError ex) {
+            try { input.close(); } catch (IOException close) { ex.addSuppressed(close); }
+            throw new IOException("Cannot open bundled XZ resource " + path + ".xz", ex);
+        }
+    }
+
+    private static boolean compact(String platform, String name) {
+        return NativeLibraryLoader.class.getResource(
+            "/com/microsoft/z3/native/" + platform + "/" + name) == null;
+    }
+
+    private static String resourceHash(String platform, String name) throws IOException {
+        if (!compact(platform, name)) {
+            try (InputStream input = resource(platform, name)) { return hash(input); }
+        }
+        String path = "/com/microsoft/z3/native/" + platform + "/" + name + ".sha256";
+        try (InputStream input = NativeLibraryLoader.class.getResourceAsStream(path)) {
+            if (input == null) { throw new FileNotFoundException("Missing XZ digest " + path); }
+            byte[] bytes = new byte[65];
+            int count = 0;
+            while (count < bytes.length) {
+                int n = input.read(bytes, count, bytes.length - count);
+                if (n < 0) { break; }
+                count += n;
+            }
+            String value = new String(bytes, 0, count, java.nio.charset.StandardCharsets.US_ASCII);
+            if (!value.matches("[0-9a-f]{64}\\n") || input.read() != -1) {
+                throw new IOException("Invalid XZ digest " + path);
+            }
+            return value.substring(0, 64);
+        }
+    }
+
+    private static String encodedHash(String platform, String name) throws IOException {
+        if (!compact(platform, name)) { return ""; }
+        String path = "/com/microsoft/z3/native/" + platform + "/" + name + ".xz";
+        try (InputStream input = NativeLibraryLoader.class.getResourceAsStream(path)) {
+            if (input == null) { throw new FileNotFoundException("Missing bundled native resource " + path); }
+            return hash(input);
+        }
+    }
+
+    private static void verifyCompact(String platform, String name, Path file) throws IOException {
+        if (compact(platform, name) && !matches(file, resourceHash(platform, name))) {
+            throw new IOException("Decoded XZ checksum mismatch for " + name);
+        }
     }
 
     private static Path extract(Path directory, String name, InputStream input) throws IOException {
@@ -195,15 +253,12 @@ final class NativeLibraryLoader {
         String coreHash;
         String bridgeHash;
         // Derive identity from the actual bundled bytes, not the version or a mutable manifest.
-        try (InputStream input = resource(platform, core)) {
-            coreHash = hash(input);
-        }
-        try (InputStream input = resource(platform, bridge)) {
-            bridgeHash = hash(input);
-        }
+        coreHash = resourceHash(platform, core);
+        bridgeHash = resourceHash(platform, bridge);
         String identity;
         try (InputStream input = new java.io.ByteArrayInputStream(
-                (coreHash + bridgeHash).getBytes(java.nio.charset.StandardCharsets.US_ASCII))) {
+                (coreHash + bridgeHash + encodedHash(platform, core) + encodedHash(platform, bridge))
+                    .getBytes(java.nio.charset.StandardCharsets.US_ASCII))) {
             identity = hash(input);
         }
         Path root = cacheRoot();
